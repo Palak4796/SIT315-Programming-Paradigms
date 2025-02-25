@@ -1,76 +1,68 @@
-const int sensorPin = 7;   // Ultrasonic sensor SIG pin
-const int irSensorPin = A4; // IR sensor connected to Analog pin A4
-const int ledUltrasonic = 13;  // Built-in LED
-const int ledIR = 10;    // External LED for IR sensor alert
+// Pin definitions for PIR motion sensor and LED
+const int pirPin = 3, motionLedPin = 13;
+// Pin definitions for Tilt sensor and LED
+const int tiltPin = 2, tiltLedPin = 10;
 
-volatile bool interruptTriggered = false;
+// Volatile variables to store sensor states (updated in interrupts)
+volatile int motionDetected = 0, tiltDetected = 0;
 
-void IRAM_ATTR handleInterrupt() {
-  interruptTriggered = true;
+// Variables to track previous states to avoid redundant Serial prints
+int prevMotionState = 0, prevTiltState = 0;
+int prevMotionLedState = 0, prevTiltLedState = 0;
+
+// Interrupt Service Routine (ISR) for PIR motion sensor
+void motionISR() {
+  motionDetected = digitalRead(pirPin);
+}
+
+// Interrupt Service Routine (ISR) for Tilt sensor
+void tiltISR() {
+  tiltDetected = digitalRead(tiltPin);
 }
 
 void setup() {
-  pinMode(sensorPin, OUTPUT);
-  pinMode(ledUltrasonic, OUTPUT);
-  pinMode(ledIR, OUTPUT);
+  // Configure sensor pins
+  pinMode(pirPin, INPUT);
+  pinMode(tiltPin, INPUT_PULLUP);
+
+  // Configure LED pins
+  pinMode(motionLedPin, OUTPUT);
+  pinMode(tiltLedPin, OUTPUT);
+
+  // Initialize Serial Monitor
   Serial.begin(9600);
 
-  // Attach interrupt on pin 2 (example, ensure the correct pin for your board)
-  pinMode(2, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(2), handleInterrupt, FALLING);
-
-  // Test External LED (should turn ON for 5 sec on startup)
-  digitalWrite(ledIR, HIGH);
-  Serial.println("IR LED ON (Startup Test)");
-  delay(5000);
-  digitalWrite(ledIR, LOW);
+  // Attach interrupts to sensors, triggering on state change
+  attachInterrupt(digitalPinToInterrupt(pirPin), motionISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(tiltPin), tiltISR, CHANGE);
 }
 
 void loop() {
-  if (interruptTriggered) {
-    Serial.println("Interrupt Triggered! Emergency Stop.");
-    digitalWrite(ledUltrasonic, LOW);
-    digitalWrite(ledIR, LOW);
-    interruptTriggered = false;
-    return;
+  // Update LED states based on sensor readings
+  digitalWrite(motionLedPin, motionDetected);
+  digitalWrite(tiltLedPin, tiltDetected);
+
+  // Print only when motion state changes
+  if (motionDetected != prevMotionState) {
+    Serial.println(motionDetected ? "Motion detected!" : "Motion stopped.");
+    prevMotionState = motionDetected; // Update previous state
   }
 
-  // --- Ultrasonic Sensor ---
-  pinMode(sensorPin, OUTPUT);
-  digitalWrite(sensorPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(sensorPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(sensorPin, LOW);
-  
-  pinMode(sensorPin, INPUT);
-  long duration = pulseIn(sensorPin, HIGH);
-  int distance = duration * 0.034 / 2; // Convert to cm
-
-  Serial.print("Distance: ");
-  Serial.print(distance);
-  Serial.println(" cm");
-
-  // Turn on built-in LED if object is within 50 cm
-  if (distance > 0 && distance <= 50) {
-    digitalWrite(ledUltrasonic, HIGH);
-    Serial.println("Ultrasonic LED ON");
-  } else {
-    digitalWrite(ledUltrasonic, LOW);
+  // Print only when tilt state changes
+  if (tiltDetected != prevTiltState) {
+    Serial.println(tiltDetected ? "Tilt detected!" : "Tilt stopped.");
+    prevTiltState = tiltDetected; // Update previous state
   }
 
-  // --- IR Sensor ---
-  int irValue = analogRead(irSensorPin);
-  Serial.print("IR Sensor Value: ");
-  Serial.println(irValue);
-
-  // Assuming IR sensor gives a high value when an object is detected
-  if (irValue > 20) {  // Adjust threshold based on IR sensor output
-    digitalWrite(ledIR, HIGH);
-    Serial.println("IR LED ON");
-  } else {
-    digitalWrite(ledIR, LOW);
+  // Print only when Motion LED state changes
+  if (digitalRead(motionLedPin) != prevMotionLedState) {
+    Serial.println(digitalRead(motionLedPin) ? "Motion LED is ON" : "Motion LED is OFF");
+    prevMotionLedState = digitalRead(motionLedPin); // Update previous LED state
   }
 
-  delay(1000); // Wait 1 second before next reading
+  // Print only when Tilt LED state changes
+  if (digitalRead(tiltLedPin) != prevTiltLedState) {
+    Serial.println(digitalRead(tiltLedPin) ? "Tilt LED is ON" : "Tilt LED is OFF");
+    prevTiltLedState = digitalRead(tiltLedPin); // Update previous LED state
+  }
 }
