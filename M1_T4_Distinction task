@@ -2,61 +2,66 @@
 #include <BH1750.h>
 #include <PinChangeInterrupt.h>
 
-// Pin Assignments
-#define MOTION_SENSOR_PIN 3
-#define ULTRASONIC_TRIG 2
-#define ULTRASONIC_ECHO 4
-#define LED_MOTION 8
-#define LED_PROXIMITY 9
-#define LED_AMBIENT 10
+// Pin Definitions
+#define PIR_PIN 3
+#define TRIG_PIN 2
+#define ECHO_PIN 4
+#define LED_WHITE 8
+#define LED_BLUE 9
+#define LED_GENERAL 10
 
-// Sensor Instance
-BH1750 luxSensor;
+// Sensor Setup
+BH1750 lightMeter;
 
-// Volatile Flags for Interrupts
-volatile bool isMotionDetected = false;
-volatile bool isObstaclePresent = false;
+// Volatile Variables for Interrupts
+volatile bool motionDetected = false;
+volatile bool obstacleDetected = false;
 
-// Thresholds for Sensor Readings
-#define LUX_THRESHOLD 1200   // Lux limit for turning on Ambient LED
-#define PROXIMITY_LIMIT 15   // Distance limit in cm for obstacle detection
+// Light Sensor Threshold
+#define LIGHT_THRESHOLD 1500  // Lux level for turning on General LED
+#define DISTANCE_THRESHOLD 10 // cm threshold for obstacle detection
 
-// Timer Interrupt Control Variable
-volatile bool triggerLuxReading = false;
+// Timer Variables
+volatile bool readLightSensor = false;
 
-// Timer Interrupt (Executes every 2 seconds)
+// LED State Tracking
+bool prevWhiteLED = false;
+bool prevBlueLED = false;
+bool prevGeneralLED = false;
+
+// Timer Interrupt Routine (Fires every 2 seconds)
 ISR(TIMER1_COMPA_vect) {
-  triggerLuxReading = true;
+  readLightSensor = true;
 }
 
-// PIR Sensor Interrupt Handler
-void detectMotion() {
-  isMotionDetected = digitalRead(MOTION_SENSOR_PIN);
-  delay(50); // Debounce PIR sensor to prevent false triggers
+// PIR Interrupt Routine
+void PIR_ISR() {
+  motionDetected = digitalRead(PIR_PIN);
+  delay(50); // Debounce PIR sensor
 }
 
 void setup() {
   Serial.begin(9600);
 
-  // Configure PIR Sensor
-  pinMode(MOTION_SENSOR_PIN, INPUT);
-  attachPCINT(digitalPinToPCINT(MOTION_SENSOR_PIN), detectMotion, CHANGE);
+  // PIR Sensor Setup
+  pinMode(PIR_PIN, INPUT);
+  attachPCINT(digitalPinToPCINT(PIR_PIN), PIR_ISR, CHANGE);
 
-  // Configure Ultrasonic Sensor
-  pinMode(ULTRASONIC_TRIG, OUTPUT);
-  pinMode(ULTRASONIC_ECHO, INPUT);
+  // Ultrasonic Sensor Setup
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 
-  // Configure LEDs
-  pinMode(LED_MOTION, OUTPUT);
-  pinMode(LED_PROXIMITY, OUTPUT);
-  pinMode(LED_AMBIENT, OUTPUT);
+  // LED Setup
+  pinMode(LED_WHITE, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+  pinMode(LED_GENERAL, OUTPUT);
 
   // Initialize Light Sensor (SDA - A4, SCL - A3)
   Wire.begin();
-  luxSensor.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
-  delay(200); // Allow sensor initialization time
+  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+  delay(200); // Allow time for the sensor to stabilize
 
-  // Timer1 Configuration (2-second interval)
+  // Configure Timer1 (2-second interrupt)
   cli();
   TCCR1A = 0;
   TCCR1B = 0;
@@ -67,39 +72,61 @@ void setup() {
   TIMSK1 |= (1 << OCIE1A);
   sei();
 
-  Serial.println("System Ready");
+  Serial.println("System Initialized");
 }
 
 void loop() {
-  // Handle PIR-Based Motion Detection
-  digitalWrite(LED_MOTION, isMotionDetected);
-  if (isMotionDetected) {
-    Serial.println("Movement Detected!");
+  // Handle PIR Motion Detection
+  digitalWrite(LED_WHITE, motionDetected);
+  if (motionDetected && !prevWhiteLED) {
+    Serial.println("Motion Detected! White LED ON");
+    prevWhiteLED = true;
+  } else if (!motionDetected && prevWhiteLED) {
+    Serial.println("Motion LED OFF");
+    prevWhiteLED = false;
   }
 
-  // Handle Ultrasonic-Based Obstacle Detection
-  digitalWrite(ULTRASONIC_TRIG, LOW);
+  // Handle Ultrasonic Sensor Obstacle Detection
+  digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
-  digitalWrite(ULTRASONIC_TRIG, HIGH);
+  digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
-  digitalWrite(ULTRASONIC_TRIG, LOW);
+  digitalWrite(TRIG_PIN, LOW);
 
-  long pulseDuration = pulseIn(ULTRASONIC_ECHO, HIGH, 30000); // Timeout for safety
-  float measuredDistance = pulseDuration * 0.034 / 2; // Convert time to distance in cm
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // Timeout to prevent hang
+  float distance = duration * 0.034 / 2; // Convert to cm
 
-  isObstaclePresent = (measuredDistance > 0 && measuredDistance < PROXIMITY_LIMIT);
-  digitalWrite(LED_PROXIMITY, isObstaclePresent);
-  if (isObstaclePresent) {
-    Serial.println("Nearby Object Detected!");
+  obstacleDetected = (distance > 0 && distance < DISTANCE_THRESHOLD);
+  digitalWrite(LED_BLUE, obstacleDetected);
+
+  if (obstacleDetected && !prevBlueLED) {
+    Serial.println("Obstacle Detected! Blue LED ON");
+    prevBlueLED = true;
+  } else if (!obstacleDetected && prevBlueLED) {
+    Serial.println("Obstacle LED OFF");
+    prevBlueLED = false;
   }
 
-  // Handle Light Sensor Readings
-  float lightLevel = luxSensor.readLightLevel();
-  Serial.print("Brightness: ");
-  Serial.print(lightLevel);
-  Serial.println(" lx");
+  // Read Light Sensor (only when Timer fires)
+  if (readLightSensor) {
+    float lux = lightMeter.readLightLevel();
+    Serial.print("Light Intensity: ");
+    Serial.print(lux);
+    Serial.println(" lx");
 
-  digitalWrite(LED_AMBIENT, lightLevel > LUX_THRESHOLD); // Turn on if dark
+    bool generalLEDState = (lux > LIGHT_THRESHOLD);
+    digitalWrite(LED_GENERAL, generalLEDState);
 
-  delay(500); // Delay to stabilize readings
+    if (generalLEDState && !prevGeneralLED) {
+      Serial.println("General LED ON (High Light Intensity)");
+      prevGeneralLED = true;
+    } else if (!generalLEDState && prevGeneralLED) {
+      Serial.println("General LED OFF (Low Light Intensity)");
+      prevGeneralLED = false;
+    }
+
+    readLightSensor = false; // Reset timer flag
+  }
+
+  delay(500); // Small delay to allow stable readings
 }
