@@ -1,0 +1,251 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <CL/cl.h>
+#include <pthread.h>
+
+#define PRINT 1
+int SZ = 100000000;  // Default size of the vector (1e8 elements)
+
+int *v1, *v2, *v_out;  // Vectors for the input and output
+
+cl_mem bufV1, bufV2, bufV_out;  // OpenCL memory buffers for vectors
+cl_device_id device_id;  // OpenCL device ID
+cl_context context;  // OpenCL context
+cl_program program;  // OpenCL program
+cl_kernel kernel;  // OpenCL kernel
+cl_command_queue queue;  // Command queue for OpenCL operations
+cl_event event = NULL;  // Event for profiling kernel execution
+int err;  // Error variable for OpenCL functions
+
+// OpenCL kernel source code for parallel vector addition
+const char *kernelSource = 
+"__kernel void vector_add_ocl(const int size, __global int *v1, __global int *v2, __global int *v_out) {\n"
+"    const int globalIndex = get_global_id(0);  // Get global index for each work item\n"
+"    if (globalIndex < size) {  // Ensure the index is within bounds\n"
+"        v_out[globalIndex] = v1[globalIndex] + v2[globalIndex];  // Add the corresponding elements\n"
+"    }\n"
+"}\n";
+
+// Function prototypes
+cl_device_id create_device();
+void setup_openCL_device_context_queue_kernel(const char *kernelSource, const char *kernelname);
+cl_program build_program(cl_context ctx, cl_device_id dev, const char *source);
+void setup_kernel_memory();
+void copy_kernel_args();
+void free_memory();
+void init(int **A, int size);
+void print(int *A, int size);
+void multi_threaded_vector_add(int *v1, int *v2, int *v_out, int size);  // Multi-threaded version
+
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        SZ = atoi(argv[1]);  // Override the default size with the user input
+    }
+
+    // Initialize vectors v1, v2, and v_out with random values
+    init(&v1, SZ);
+    init(&v2, SZ);
+    init(&v_out, SZ); 
+
+    size_t global[1] = {(size_t)SZ};  // Define global work size (number of work items)
+
+    print(v1, SZ);  // Optionally print first 5 elements of v1
+    print(v2, SZ);  // Optionally print first 5 elements of v2
+   
+    // Set up OpenCL device, context, queue, and kernel
+    setup_openCL_device_context_queue_kernel(kernelSource, "vector_add_ocl");
+    setup_kernel_memory();  // Allocate buffers for the vectors
+    copy_kernel_args();  // Set kernel arguments
+
+    cl_ulong time_start, time_end;
+    double total_time;
+
+    // Launch the OpenCL kernel to perform vector addition
+    clEnqueueNDRangeKernel(queue, kernel, 1, NULL, global, NULL, 0, NULL, &event);
+    clWaitForEvents(1, &event);  // Wait for kernel execution to finish
+    clEnqueueReadBuffer(queue, bufV_out, CL_TRUE, 0, SZ * sizeof(int), v_out, 0, NULL, NULL);
+
+    // Profiling: Get start and end time of kernel execution
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);
+    clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);
+    total_time = (double)(time_end - time_start) * 1e-6;  // Convert to milliseconds
+
+    print(v_out, SZ);  // Optionally print first 5 elements of the result
+    printf("OpenCL Kernel Execution Time: %f ms\n", total_time);  // Output execution time
+
+    // Multi-threaded vector addition using pthreads
+    int *v_out_mt = (int *)malloc(sizeof(int) * SZ);
+    clock_t start_mt = clock();
+    multi_threaded_vector_add(v1, v2, v_out_mt, SZ);
+    clock_t end_mt = clock();
+    double mt_time = ((double)(end_mt - start_mt)) / CLOCKS_PER_SEC * 1000;  // Convert to milliseconds
+
+    print(v_out_mt, SZ);  // Optionally print first 5 elements of the result from multi-threaded version
+    printf("Multi-threaded Execution Time: %f ms\n", mt_time);  // Output multi-threaded execution time
+
+    // Free memory and OpenCL resources
+    free_memory();
+    free(v_out_mt);
+    return 0;
+}
+
+// Initialize a vector with random integers
+void init(int **A, int size) {
+    *A = (int *)malloc(sizeof(int) * size);  // Allocate memory for the vector
+    for (long i = 0; i < size; i++) {
+        (*A)[i] = rand() % 100;  // Initialize with random values between 0 and 99
+    }
+}
+
+// Print the elements of a vector
+void print(int *A, int size) {
+    if (PRINT == 0) return;  // Only print if PRINT flag is set
+    if (PRINT == 1 && size > 15) {  // If the size is large, print only the first and last 5 elements
+        for (long i = 0; i < 5; i++) printf("%d ", A[i]);
+        printf(" ..... ");
+        for (long i = size - 5; i < size; i++) printf("%d ", A[i]);
+    } else {
+        for (long i = 0; i < size; i++) printf("%d ", A[i]);  // Print all elements if small size
+    }
+    printf("\n----------------------------\n");
+}
+
+// Release OpenCL resources and free memory
+void free_memory() {
+    clReleaseMemObject(bufV1);  // Release OpenCL memory objects
+    clReleaseMemObject(bufV2);
+    clReleaseMemObject(bufV_out);
+    clReleaseKernel(kernel);  // Release the kernel
+    clReleaseCommandQueue(queue);  // Release the command queue
+    clReleaseProgram(program);  // Release the OpenCL program
+    clReleaseContext(context);  // Release the OpenCL context
+    free(v1);  // Free allocated host memory
+    free(v2);
+    free(v_out);
+}
+
+// Set the arguments for the kernel
+void copy_kernel_args() {
+    clSetKernelArg(kernel, 0, sizeof(int), (void *)&SZ);  // Set vector size argument
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&bufV1);  // Set buffer for v1
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&bufV2);  // Set buffer for v2
+    clSetKernelArg(kernel, 3, sizeof(cl_mem), (void *)&bufV_out);  // Set buffer for result v_out
+}
+
+// Allocate buffers for OpenCL memory and transfer data
+void setup_kernel_memory() {
+    bufV1 = clCreateBuffer(context, CL_MEM_READ_WRITE, SZ * sizeof(int), NULL, NULL);  // Create buffer for v1
+    bufV2 = clCreateBuffer(context, CL_MEM_READ_WRITE, SZ * sizeof(int), NULL, NULL);  // Create buffer for v2
+    bufV_out = clCreateBuffer(context, CL_MEM_READ_WRITE, SZ * sizeof(int), NULL, NULL);  // Create buffer for v_out
+
+    // Copy the input vectors from host to device
+    clEnqueueWriteBuffer(queue, bufV1, CL_TRUE, 0, SZ * sizeof(int), v1, 0, NULL, NULL);
+    clEnqueueWriteBuffer(queue, bufV2, CL_TRUE, 0, SZ * sizeof(int), v2, 0, NULL, NULL);
+}
+
+// Set up OpenCL device, context, queue, and program
+void setup_openCL_device_context_queue_kernel(const char *kernelSource, const char *kernelname) {
+    device_id = create_device();  // Get OpenCL device
+
+    // Create OpenCL context for the device
+    context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &err);
+    if (err < 0) {
+        perror("Couldn't create a context");
+        exit(1);
+    }
+
+    program = build_program(context, device_id, kernelSource);  // Build OpenCL program from source
+
+    // Create command queue for the context and device
+    queue = clCreateCommandQueue(context, device_id, CL_QUEUE_PROFILING_ENABLE, &err);
+    if (err < 0) {
+        perror("Couldn't create a command queue");
+        exit(1);
+    }
+
+    // Create OpenCL kernel
+    kernel = clCreateKernel(program, kernelname, &err);
+    if (err < 0) {
+        perror("Couldn't create a kernel");
+        exit(1);
+    }
+}
+
+// Build OpenCL program from source
+cl_program build_program(cl_context ctx, cl_device_id dev, const char *source) {
+    cl_program program;
+    size_t lengths[1] = { strlen(source) };  // Get source length
+    const char *sources[1] = { source };  // Set source code
+    program = clCreateProgramWithSource(ctx, 1, sources, lengths, &err);  // Create program
+    if (err < 0) {
+        perror("Couldn't create the program");
+        exit(1);
+    }
+
+    // Build the program
+    err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    if (err < 0) {
+        size_t log_size;
+        char *program_log;
+        clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        program_log = (char *)malloc(log_size + 1);
+        program_log[log_size] = '\0';
+        clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
+        printf("Build log:\n%s\n", program_log);  // Print build log if failed
+        free(program_log);
+        exit(1);
+    }
+
+    return program;
+}
+
+// Create OpenCL device (either GPU or CPU)
+cl_device_id create_device() {
+    cl_platform_id platform;
+    cl_device_id dev;
+
+    err = clGetPlatformIDs(1, &platform, NULL);  // Get OpenCL platform
+    if (err < 0) {
+        perror("Couldn't identify a platform");
+        exit(1);
+    }
+
+    // Try to get GPU device, fallback to CPU if not available
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &dev, NULL);
+    if (err == CL_DEVICE_NOT_FOUND) {
+        printf("GPU not found, trying CPU...\n");
+        err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 1, &dev, NULL);
+    }
+    if (err < 0) {
+        perror("Couldn't access any devices");
+        exit(1);
+    }
+
+    return dev;
+}
+
+// Multi-threaded vector addition using pthreads
+void multi_threaded_vector_add(int *v1, int *v2, int *v_out, int size) {
+    int num_threads = 4;  // Use 4 threads for parallel execution
+    pthread_t threads[num_threads];
+    
+    // Function to perform addition on a portion of the array
+    void *thread_func(void *arg) {
+        long start_idx = (long)arg;
+        long end_idx = start_idx + SZ / num_threads;
+        
+        for (long i = start_idx; i < end_idx; i++) {
+            v_out[i] = v1[i] + v2[i];
+        }
+        return NULL;
+    }
+
+    for (int i = 0; i < num_threads; i++) {
+        pthread_create(&threads[i], NULL, thread_func, (void *)(long)(i * (SZ / num_threads)));
+    }
+
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(threads[i], NULL);  // Wait for threads to finish
+    }
+}
